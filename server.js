@@ -201,103 +201,6 @@ const formatText = async (text) => {
   }
 };
 
-// Função para baixar vídeo do Instagram
-async function downloadInstagramVideo(url) {
-  try {
-    // Extrair o shortcode da URL do Instagram
-    const shortcode = url.split('/p/')[1]?.split('/')[0] || 
-                     url.split('/reel/')[1]?.split('/')[0] || 
-                     url.split('/tv/')[1]?.split('/')[0];
-    
-    if (!shortcode) {
-      throw new Error('URL do Instagram inválida');
-    }
-
-    // Tentar diferentes métodos de extração
-    const methods = [
-      // Método 1: API oEmbed
-      async () => {
-        const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(url)}`;
-        const response = await fetch(oembedUrl);
-        const data = await response.json();
-        if (!data.thumbnail_url) throw new Error('Thumbnail não encontrada');
-        // Converter URL da thumbnail para URL do vídeo
-        return data.thumbnail_url.replace('/s150x150/', '/').replace('/c0.135.1080.1080/', '/').replace('_n.jpg', '.mp4');
-      },
-      // Método 2: HTML scraping
-      async () => {
-        const response = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://www.instagram.com/'
-          }
-        });
-        const html = await response.text();
-        const videoMatch = html.match(/"video_url":"([^"]+)"|"contentUrl":"([^"]+)"|<meta property="og:video" content="([^"]+)"/);
-        if (!videoMatch) throw new Error('URL do vídeo não encontrada no HTML');
-        return videoMatch[1] || videoMatch[2] || videoMatch[3];
-      },
-      // Método 3: API GraphQL
-      async () => {
-        const graphqlUrl = `https://www.instagram.com/graphql/query/?query_hash=b3055c01b4b222b8a47dc12b090e4e64&variables={"shortcode":"${shortcode}"}`;
-        const response = await fetch(graphqlUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json',
-            'Referer': 'https://www.instagram.com/'
-          }
-        });
-        const data = await response.json();
-        const videoUrl = data?.data?.shortcode_media?.video_url;
-        if (!videoUrl) throw new Error('Vídeo não encontrado na API GraphQL');
-        return videoUrl;
-      }
-    ];
-
-    // Tentar cada método em sequência
-    let lastError = null;
-    for (const method of methods) {
-      try {
-        const videoUrl = await method();
-        if (!videoUrl) continue;
-
-        // Baixar o vídeo
-        const videoResponse = await fetch(videoUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Referer': 'https://www.instagram.com/'
-          }
-        });
-
-        if (!videoResponse.ok) {
-          throw new Error(`Falha ao baixar vídeo: ${videoResponse.status} ${videoResponse.statusText}`);
-        }
-
-        const arrayBuffer = await videoResponse.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
-        // Salvar temporariamente
-        const tempPath = `temp_instagram_${Date.now()}.mp4`;
-        fs.writeFileSync(tempPath, buffer);
-
-        console.log('Método de extração bem sucedido:', methods.indexOf(method) + 1);
-        return tempPath;
-      } catch (error) {
-        console.log('Método', methods.indexOf(method) + 1, 'falhou:', error.message);
-        lastError = error;
-      }
-    }
-
-    // Se chegou aqui, nenhum método funcionou
-    throw new Error(`Não foi possível extrair o vídeo após tentar todos os métodos. Último erro: ${lastError?.message}`);
-  } catch (error) {
-    console.error('Erro ao baixar vídeo do Instagram:', error);
-    throw new Error(`Falha ao baixar vídeo do Instagram: ${error.message}`);
-  }
-}
-
 // =============================================
 // ROTAS DA API
 // =============================================
@@ -310,6 +213,12 @@ app.post('/api/transcribe-youtube', async (req, res) => {
   try {
     const { url, language, shouldTranslate = false, shouldFormat = false } = req.body;
     
+    if (!url || !url.trim()) {
+      return res.status(400).json({ 
+        error: 'URL do YouTube é obrigatória' 
+      });
+    }
+
     if (!ytdl.validateURL(url)) {
       return res.status(400).json({ 
         error: 'URL do YouTube inválida' 
@@ -318,9 +227,33 @@ app.post('/api/transcribe-youtube', async (req, res) => {
 
     console.log('Processando YouTube:', url);
     
+    // Obter informações do vídeo
+    const videoInfo = await ytdl.getInfo(url);
+    const videoLength = parseInt(videoInfo.videoDetails.lengthSeconds);
+    
+    // Verificar duração do vídeo (limite de 2 horas)
+    if (videoLength > 7200) {
+      return res.status(400).json({
+        error: 'Vídeo muito longo. O limite é de 2 horas.'
+      });
+    }
+
+    // Verificar se o vídeo é privado
+    if (videoInfo.videoDetails.isPrivate) {
+      return res.status(400).json({
+        error: 'Não é possível processar vídeos privados'
+      });
+    }
+
+    // Criar diretório temporário se não existir
+    const tempDir = 'temp';
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir);
+    }
+    
     // Baixar áudio do YouTube
-    audioPath = `temp_youtube_${Date.now()}.webm`;
-    mp3Path = `temp_youtube_${Date.now()}.wav`; // Usar WAV como padrão mais compatível
+    audioPath = path.join(tempDir, `temp_youtube_${Date.now()}.webm`);
+    mp3Path = path.join(tempDir, `temp_youtube_${Date.now()}.wav`);
 
     const audioStream = ytdl(url, {
       filter: 'audioonly',
@@ -328,12 +261,22 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     });
 
     const writeStream = fs.createWriteStream(audioPath);
-    audioStream.pipe(writeStream);
+    
+    // Adicionar eventos de progresso
+    let downloadProgress = 0;
+    audioStream.on('progress', (_, downloaded, total) => {
+      const progress = (downloaded / total) * 100;
+      if (progress - downloadProgress >= 10) {
+        console.log(`Download progresso: ${Math.round(progress)}%`);
+        downloadProgress = progress;
+      }
+    });
 
     await new Promise((resolve, reject) => {
       writeStream.on('finish', resolve);
       writeStream.on('error', reject);
       audioStream.on('error', reject);
+      audioStream.pipe(writeStream);
     });
 
     console.log('Áudio baixado, convertendo...');
@@ -341,126 +284,109 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     // Converter para áudio compatível
     await convertVideoToAudio(audioPath, mp3Path);
 
-    // Transcrever com OpenAI (ou simulação)
-    let transcription;
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
-      console.log('Enviando para Whisper...');
-      
-      const transcriptionParams = {
-        file: fs.createReadStream(mp3Path),
-        model: "whisper-1"
-      };
-      
-      if (language && language !== 'auto') {
-        transcriptionParams.language = language;
-        console.log(`Idioma forçado: ${language}`);
-      } else {
-        console.log('Detecção automática de idioma');
-      }
-      
-      const response = await openai.audio.transcriptions.create(transcriptionParams);
-      transcription = response.text;
+    // Verificar se a chave da OpenAI está configurada
+    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'sua-chave-aqui') {
+      throw new Error('Chave da API OpenAI não configurada. Configure a variável OPENAI_API_KEY no arquivo .env');
+    }
 
-      // Processar o texto se solicitado
-      if (shouldTranslate || shouldFormat) {
-        console.log('Processando texto transcrito...');
-        let processedText = transcription;
-
-        if (shouldTranslate) {
-          console.log('Traduzindo...');
-          processedText = await translateText(processedText);
-        }
-
-        if (shouldFormat) {
-          console.log('Formatando...');
-          processedText = await formatText(processedText);
-        }
-
-        return res.json({ 
-          originalTranscription: transcription,
-          processedTranscription: processedText,
-          operations: {
-            translated: shouldTranslate,
-            formatted: shouldFormat
-          }
-        });
-      }
+    console.log('Enviando para Whisper...');
+    
+    const transcriptionParams = {
+      file: fs.createReadStream(mp3Path),
+      model: "whisper-1"
+    };
+    
+    if (language && language !== 'auto') {
+      transcriptionParams.language = language;
+      console.log(`Idioma forçado: ${language}`);
     } else {
-      // Simulação para demonstração
-      transcription = `Transcrição simulada do vídeo YouTube: ${url}\n\nEsta é uma demonstração. Para funcionar de verdade, você precisa:\n1. Configurar sua chave da OpenAI\n2. Adicionar OPENAI_API_KEY nas variáveis de ambiente\n\nO vídeo foi baixado e convertido para MP3 com sucesso. Esta seria a transcrição real do áudio.`;
+      console.log('Detecção automática de idioma');
+    }
+    
+    const response = await openai.audio.transcriptions.create(transcriptionParams);
+    const transcription = response.text;
+
+    // Limpar arquivos temporários
+    try {
+      if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+      if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+    } catch (cleanupError) {
+      console.error('Erro ao limpar arquivos temporários:', cleanupError);
+    }
+
+    // Processar o texto se solicitado
+    if (shouldTranslate || shouldFormat) {
+      console.log('Processando texto transcrito...');
+      let processedText = transcription;
+
+      if (shouldTranslate) {
+        console.log('Traduzindo...');
+        processedText = await translateText(processedText);
+      }
+
+      if (shouldFormat) {
+        console.log('Formatando...');
+        processedText = await formatText(processedText);
+      }
+
+      return res.json({ 
+        originalTranscription: transcription,
+        processedTranscription: processedText,
+        operations: {
+          translated: shouldTranslate,
+          formatted: shouldFormat
+        }
+      });
     }
 
     res.json({ transcription });
 
   } catch (error) {
     console.error('Erro YouTube:', error);
+    
+    // Limpar arquivos temporários em caso de erro
+    try {
+      if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+      if (mp3Path && fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+    } catch (cleanupError) {
+      console.error('Erro ao limpar arquivos temporários:', cleanupError);
+    }
+
+    // Retornar mensagem de erro mais amigável
+    let errorMessage = 'Erro ao processar vídeo do YouTube';
+    if (error.message.includes('OPENAI_API_KEY')) {
+      errorMessage = 'Erro de configuração: Chave da API OpenAI não configurada';
+    } else if (error.message.includes('Status code: 429')) {
+      errorMessage = 'Limite de requisições excedido. Tente novamente mais tarde';
+    } else if (error.message.includes('private video')) {
+      errorMessage = 'Este vídeo é privado e não pode ser processado';
+    }
+    
     res.status(500).json({ 
-      error: 'Erro ao processar vídeo do YouTube: ' + error.message 
+      error: errorMessage,
+      details: error.message
     });
-  } finally {
-    // Limpar arquivos temporários
-    cleanupFile(audioPath);
-    cleanupFile(mp3Path);
   }
 });
 
 // Rota para transcrever Instagram
 app.post('/api/transcribe-instagram', async (req, res) => {
-  let videoPath = null;
-  let audioPath = null;
-
   try {
-    const { url, language } = req.body;
+    const { url, language } = req.body; // Adicionar parâmetro de idioma
     
-    if (!url) {
-      return res.status(400).json({ error: 'URL não fornecida' });
-    }
-
     console.log('Processando Instagram:', url);
     
-    // Baixar vídeo do Instagram
-    videoPath = await downloadInstagramVideo(url);
-    
-    // Converter para áudio
-    audioPath = `temp_instagram_${Date.now()}.wav`;
-    await convertVideoToAudio(videoPath, audioPath);
+    // Para Instagram, você precisaria usar bibliotecas específicas
+    // Por enquanto, simulação
+    const transcription = `Transcrição simulada do Instagram: ${url}\n\nEsta é uma demonstração. Para Instagram funcionar de verdade, você precisa:\n1. Implementar downloader do Instagram (instaloader, etc.)\n2. Configurar autenticação se necessário\n3. Processar diferentes tipos de mídia (Reels, IGTV, Posts)\n\nO conteúdo seria baixado, convertido para MP3 e transcrito automaticamente.`;
 
-    // Transcrever com OpenAI
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
-      console.log('Enviando para Whisper...');
-      
-      const transcriptionParams = {
-        file: fs.createReadStream(audioPath),
-        model: "whisper-1"
-      };
-      
-      if (language && language !== 'auto') {
-        transcriptionParams.language = language;
-      }
-      
-      const response = await openai.audio.transcriptions.create(transcriptionParams);
-      const transcription = response.text;
-
-      res.json({ transcription });
-    } else {
-      res.json({ 
-        transcription: 'Para transcrever vídeos do Instagram, configure sua chave da OpenAI e credenciais do Instagram no arquivo .env' 
-      });
-    }
+    res.json({ transcription });
 
   } catch (error) {
     console.error('Erro Instagram:', error);
     res.status(500).json({ 
       error: 'Erro ao processar vídeo do Instagram: ' + error.message 
     });
-  } finally {
-    // Limpar arquivos temporários
-    try {
-      if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-      if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
-    } catch (error) {
-      console.error('Erro ao limpar arquivos temporários:', error);
-    }
   }
 });
 
