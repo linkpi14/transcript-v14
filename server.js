@@ -151,6 +151,56 @@ const validateMediaFile = (filePath, originalName) => {
   });
 };
 
+// Função para traduzir texto usando ChatGPT
+const translateText = async (text) => {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "Você é um tradutor profissional. Traduza o texto para português do Brasil mantendo o significado e o tom original."
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ],
+      temperature: 0.3
+    });
+
+    return completion.choices[0].message.content;
+  } catch (error) {
+    console.error('Erro na tradução:', error);
+    throw new Error('Falha ao traduzir o texto: ' + error.message);
+  }
+};
+
+// Função para organizar e formatar o texto
+const formatText = async (text) => {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "Você é um editor profissional. Organize o texto em parágrafos lógicos, corrija erros de pontuação e formatação, e melhore a legibilidade mantendo o conteúdo original."
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ],
+      temperature: 0.3
+    });
+
+    return completion.choices[0].message.content;
+  } catch (error) {
+    console.error('Erro na formatação:', error);
+    throw new Error('Falha ao formatar o texto: ' + error.message);
+  }
+};
+
 // =============================================
 // ROTAS DA API
 // =============================================
@@ -161,7 +211,7 @@ app.post('/api/transcribe-youtube', async (req, res) => {
   let mp3Path = null;
 
   try {
-    const { url, language } = req.body; // Adicionar parâmetro de idioma
+    const { url, language, shouldTranslate = false, shouldFormat = false } = req.body;
     
     if (!ytdl.validateURL(url)) {
       return res.status(400).json({ 
@@ -199,13 +249,11 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
       console.log('Enviando para Whisper...');
       
-      // Configurar parâmetros da transcrição
       const transcriptionParams = {
         file: fs.createReadStream(mp3Path),
         model: "whisper-1"
       };
       
-      // Adicionar idioma apenas se especificado
       if (language && language !== 'auto') {
         transcriptionParams.language = language;
         console.log(`Idioma forçado: ${language}`);
@@ -215,6 +263,31 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       
       const response = await openai.audio.transcriptions.create(transcriptionParams);
       transcription = response.text;
+
+      // Processar o texto se solicitado
+      if (shouldTranslate || shouldFormat) {
+        console.log('Processando texto transcrito...');
+        let processedText = transcription;
+
+        if (shouldTranslate) {
+          console.log('Traduzindo...');
+          processedText = await translateText(processedText);
+        }
+
+        if (shouldFormat) {
+          console.log('Formatando...');
+          processedText = await formatText(processedText);
+        }
+
+        return res.json({ 
+          originalTranscription: transcription,
+          processedTranscription: processedText,
+          operations: {
+            translated: shouldTranslate,
+            formatted: shouldFormat
+          }
+        });
+      }
     } else {
       // Simulação para demonstração
       transcription = `Transcrição simulada do vídeo YouTube: ${url}\n\nEsta é uma demonstração. Para funcionar de verdade, você precisa:\n1. Configurar sua chave da OpenAI\n2. Adicionar OPENAI_API_KEY nas variáveis de ambiente\n\nO vídeo foi baixado e convertido para MP3 com sucesso. Esta seria a transcrição real do áudio.`;
@@ -264,8 +337,9 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
     }
 
-    // Obter idioma do body da requisição
     const language = req.body.language;
+    const shouldTranslate = req.body.shouldTranslate === 'true';
+    const shouldFormat = req.body.shouldFormat === 'true';
 
     console.log('Processando arquivo:', req.file.filename);
 
@@ -294,13 +368,11 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
       console.log('Enviando para Whisper...');
       
-      // Configurar parâmetros da transcrição
       const transcriptionParams = {
         file: fs.createReadStream(mp3Path),
         model: "whisper-1"
       };
       
-      // Adicionar idioma apenas se especificado
       if (language && language !== 'auto') {
         transcriptionParams.language = language;
         console.log(`Idioma forçado: ${language}`);
@@ -310,6 +382,31 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
       
       const response = await openai.audio.transcriptions.create(transcriptionParams);
       transcription = response.text;
+
+      // Processar o texto se solicitado
+      if (shouldTranslate || shouldFormat) {
+        console.log('Processando texto transcrito...');
+        let processedText = transcription;
+
+        if (shouldTranslate) {
+          console.log('Traduzindo...');
+          processedText = await translateText(processedText);
+        }
+
+        if (shouldFormat) {
+          console.log('Formatando...');
+          processedText = await formatText(processedText);
+        }
+
+        return res.json({ 
+          originalTranscription: transcription,
+          processedTranscription: processedText,
+          operations: {
+            translated: shouldTranslate,
+            formatted: shouldFormat
+          }
+        });
+      }
     } else {
       transcription = `Transcrição simulada do arquivo: ${req.file.originalname}\n\nEsta é uma demonstração. O arquivo foi recebido e processado com sucesso:\n- Nome: ${req.file.originalname}\n- Tamanho: ${(req.file.size / 1024 / 1024).toFixed(2)}MB\n- Tipo: ${req.file.mimetype}\n\nO arquivo foi convertido para MP3 e estaria pronto para transcrição.\nPara funcionar de verdade, configure sua chave da OpenAI.`;
     }
@@ -375,6 +472,45 @@ app.get('/api/health', (req, res) => {
     hasOpenAI: !!(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui'),
     ffmpegPath: ffmpegStatic
   });
+});
+
+// Rota para processar o texto (traduzir e formatar)
+app.post('/api/process-text', async (req, res) => {
+  try {
+    const { text, shouldTranslate = true, shouldFormat = true } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ error: 'Texto não fornecido' });
+    }
+
+    let processedText = text;
+
+    // Traduzir se necessário
+    if (shouldTranslate) {
+      console.log('Traduzindo texto...');
+      processedText = await translateText(processedText);
+    }
+
+    // Formatar se necessário
+    if (shouldFormat) {
+      console.log('Formatando texto...');
+      processedText = await formatText(processedText);
+    }
+
+    res.json({ 
+      processedText,
+      operations: {
+        translated: shouldTranslate,
+        formatted: shouldFormat
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao processar texto:', error);
+    res.status(500).json({ 
+      error: 'Erro ao processar texto: ' + error.message 
+    });
+  }
 });
 
 // Servir frontend em produção
