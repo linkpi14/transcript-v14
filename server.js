@@ -51,15 +51,14 @@ const upload = multer({
 // FUNÇÕES AUXILIARES
 // =============================================
 
-// Função para converter vídeo para MP3
-const convertVideoToMp3 = (inputPath, outputPath) => {
+// Função para converter vídeo para áudio (WAV ou MP3)
+const convertVideoToAudio = (inputPath, outputPath) => {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .audioCodec('mp3')
+    const isWav = outputPath.endsWith('.wav');
+    
+    let command = ffmpeg(inputPath)
       .audioFrequency(16000) // Whisper funciona melhor com 16kHz
       .audioChannels(1) // Mono para reduzir tamanho
-      .audioBitrate('64k') // Bitrate menor para economizar
-      .format('mp3')
       .on('start', (commandLine) => {
         console.log('FFmpeg iniciado:', commandLine);
       })
@@ -72,9 +71,40 @@ const convertVideoToMp3 = (inputPath, outputPath) => {
       })
       .on('error', (err) => {
         console.error('Erro na conversão:', err);
-        reject(err);
-      })
-      .save(outputPath);
+        
+        // Se falhar, tentar com WAV como fallback
+        if (!isWav && outputPath.endsWith('.mp3')) {
+          console.log('Tentando conversão para WAV...');
+          const wavPath = outputPath.replace('.mp3', '.wav');
+          convertVideoToAudio(inputPath, wavPath)
+            .then(resolve)
+            .catch(reject);
+        } else {
+          reject(err);
+        }
+      });
+
+    if (isWav) {
+      // WAV é mais universal e sempre funciona
+      command
+        .audioCodec('pcm_s16le')
+        .format('wav');
+    } else {
+      // Tentar MP3 primeiro, com fallback para WAV
+      try {
+        command
+          .audioCodec('libmp3lame') // Codec MP3 mais comum
+          .audioBitrate('64k')
+          .format('mp3');
+      } catch (error) {
+        console.log('MP3 não disponível, usando WAV');
+        command
+          .audioCodec('pcm_s16le')
+          .format('wav');
+      }
+    }
+
+    command.save(outputPath);
   });
 };
 
@@ -143,7 +173,7 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     
     // Baixar áudio do YouTube
     audioPath = `temp_youtube_${Date.now()}.webm`;
-    mp3Path = `temp_youtube_${Date.now()}.mp3`;
+    mp3Path = `temp_youtube_${Date.now()}.wav`; // Usar WAV como padrão mais compatível
 
     const audioStream = ytdl(url, {
       filter: 'audioonly',
@@ -159,10 +189,10 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       audioStream.on('error', reject);
     });
 
-    console.log('Áudio baixado, convertendo para MP3...');
+    console.log('Áudio baixado, convertendo...');
 
-    // Converter para MP3
-    await convertVideoToMp3(audioPath, mp3Path);
+    // Converter para áudio compatível
+    await convertVideoToAudio(audioPath, mp3Path);
 
     // Transcrever com OpenAI (ou simulação)
     let transcription;
@@ -236,15 +266,15 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
       });
     }
 
-    // Definir caminho do MP3
+    // Definir caminho do arquivo de áudio
     const fileExtension = path.extname(req.file.filename);
     const baseName = path.basename(req.file.filename, fileExtension);
-    mp3Path = path.join('uploads', `${baseName}_converted.mp3`);
+    mp3Path = path.join('uploads', `${baseName}_converted.wav`); // Usar WAV como padrão
 
-    console.log('Convertendo para MP3...');
+    console.log('Convertendo para áudio...');
 
-    // Converter para MP3
-    await convertVideoToMp3(req.file.path, mp3Path);
+    // Converter para áudio compatível
+    await convertVideoToAudio(req.file.path, mp3Path);
 
     let transcription;
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
