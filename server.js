@@ -213,47 +213,73 @@ app.post('/api/transcribe-youtube', async (req, res) => {
   try {
     const { url, language, shouldTranslate = false, shouldFormat = false } = req.body;
     
+    console.log('Iniciando processamento do YouTube:', url);
+    console.log('Configurações:', { language, shouldTranslate, shouldFormat });
+    
     if (!url || !url.trim()) {
+      console.log('URL vazia ou inválida');
       return res.status(400).json({ 
         error: 'URL do YouTube é obrigatória' 
       });
     }
 
     if (!ytdl.validateURL(url)) {
+      console.log('URL do YouTube inválida:', url);
       return res.status(400).json({ 
         error: 'URL do YouTube inválida' 
       });
     }
 
-    console.log('Processando YouTube:', url);
+    // Verificar a chave da API primeiro
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('Chave da API OpenAI não encontrada');
+      throw new Error('Chave da API OpenAI não configurada');
+    }
+
+    if (process.env.OPENAI_API_KEY === 'sua-chave-aqui') {
+      console.error('Chave da API OpenAI está com valor padrão');
+      throw new Error('Chave da API OpenAI não configurada corretamente');
+    }
+
+    console.log('Chave da API OpenAI verificada com sucesso');
     
     // Obter informações do vídeo
+    console.log('Obtendo informações do vídeo...');
     const videoInfo = await ytdl.getInfo(url);
+    console.log('Informações do vídeo obtidas:', {
+      title: videoInfo.videoDetails.title,
+      lengthSeconds: videoInfo.videoDetails.lengthSeconds,
+      isPrivate: videoInfo.videoDetails.isPrivate
+    });
+    
     const videoLength = parseInt(videoInfo.videoDetails.lengthSeconds);
     
-    // Verificar duração do vídeo (limite de 2 horas)
     if (videoLength > 7200) {
+      console.log('Vídeo muito longo:', videoLength, 'segundos');
       return res.status(400).json({
         error: 'Vídeo muito longo. O limite é de 2 horas.'
       });
     }
 
-    // Verificar se o vídeo é privado
     if (videoInfo.videoDetails.isPrivate) {
+      console.log('Vídeo é privado');
       return res.status(400).json({
         error: 'Não é possível processar vídeos privados'
       });
     }
 
-    // Criar diretório temporário se não existir
+    // Criar diretório temporário
     const tempDir = 'temp';
     if (!fs.existsSync(tempDir)) {
+      console.log('Criando diretório temporário:', tempDir);
       fs.mkdirSync(tempDir);
     }
     
     // Baixar áudio do YouTube
     audioPath = path.join(tempDir, `temp_youtube_${Date.now()}.webm`);
     mp3Path = path.join(tempDir, `temp_youtube_${Date.now()}.wav`);
+    
+    console.log('Iniciando download do áudio:', audioPath);
 
     const audioStream = ytdl(url, {
       filter: 'audioonly',
@@ -262,7 +288,6 @@ app.post('/api/transcribe-youtube', async (req, res) => {
 
     const writeStream = fs.createWriteStream(audioPath);
     
-    // Adicionar eventos de progresso
     let downloadProgress = 0;
     audioStream.on('progress', (_, downloaded, total) => {
       const progress = (downloaded / total) * 100;
@@ -272,25 +297,40 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       }
     });
 
+    console.log('Aguardando download do áudio...');
     await new Promise((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-      audioStream.on('error', reject);
+      writeStream.on('finish', () => {
+        console.log('Download do áudio concluído');
+        resolve();
+      });
+      writeStream.on('error', (err) => {
+        console.error('Erro no download do áudio:', err);
+        reject(err);
+      });
+      audioStream.on('error', (err) => {
+        console.error('Erro no stream do YouTube:', err);
+        reject(err);
+      });
       audioStream.pipe(writeStream);
     });
 
-    console.log('Áudio baixado, convertendo...');
-
-    // Converter para áudio compatível
+    console.log('Convertendo áudio para WAV...');
     await convertVideoToAudio(audioPath, mp3Path);
+    console.log('Conversão para WAV concluída');
 
-    // Verificar se a chave da OpenAI está configurada
-    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'sua-chave-aqui') {
-      throw new Error('Chave da API OpenAI não configurada. Configure a variável OPENAI_API_KEY no arquivo .env');
+    console.log('Verificando arquivo WAV...');
+    if (!fs.existsSync(mp3Path)) {
+      throw new Error('Arquivo WAV não foi criado');
+    }
+
+    const wavStats = fs.statSync(mp3Path);
+    console.log('Tamanho do arquivo WAV:', (wavStats.size / 1024 / 1024).toFixed(2), 'MB');
+
+    if (wavStats.size === 0) {
+      throw new Error('Arquivo WAV está vazio');
     }
 
     console.log('Enviando para Whisper...');
-    
     const transcriptionParams = {
       file: fs.createReadStream(mp3Path),
       model: "whisper-1"
@@ -299,50 +339,30 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     if (language && language !== 'auto') {
       transcriptionParams.language = language;
       console.log(`Idioma forçado: ${language}`);
-    } else {
-      console.log('Detecção automática de idioma');
     }
     
     const response = await openai.audio.transcriptions.create(transcriptionParams);
-    const transcription = response.text;
+    console.log('Transcrição concluída com sucesso');
 
     // Limpar arquivos temporários
     try {
-      if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
-      if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+      console.log('Limpando arquivos temporários...');
+      if (fs.existsSync(audioPath)) {
+        fs.unlinkSync(audioPath);
+        console.log('Arquivo de áudio original removido');
+      }
+      if (fs.existsSync(mp3Path)) {
+        fs.unlinkSync(mp3Path);
+        console.log('Arquivo WAV removido');
+      }
     } catch (cleanupError) {
       console.error('Erro ao limpar arquivos temporários:', cleanupError);
     }
 
-    // Processar o texto se solicitado
-    if (shouldTranslate || shouldFormat) {
-      console.log('Processando texto transcrito...');
-      let processedText = transcription;
-
-      if (shouldTranslate) {
-        console.log('Traduzindo...');
-        processedText = await translateText(processedText);
-      }
-
-      if (shouldFormat) {
-        console.log('Formatando...');
-        processedText = await formatText(processedText);
-      }
-
-      return res.json({ 
-        originalTranscription: transcription,
-        processedTranscription: processedText,
-        operations: {
-          translated: shouldTranslate,
-          formatted: shouldFormat
-        }
-      });
-    }
-
-    res.json({ transcription });
+    res.json({ transcription: response.text });
 
   } catch (error) {
-    console.error('Erro YouTube:', error);
+    console.error('Erro detalhado:', error);
     
     // Limpar arquivos temporários em caso de erro
     try {
@@ -352,7 +372,7 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       console.error('Erro ao limpar arquivos temporários:', cleanupError);
     }
 
-    // Retornar mensagem de erro mais amigável
+    // Mensagens de erro mais específicas
     let errorMessage = 'Erro ao processar vídeo do YouTube';
     if (error.message.includes('OPENAI_API_KEY')) {
       errorMessage = 'Erro de configuração: Chave da API OpenAI não configurada';
@@ -360,6 +380,12 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       errorMessage = 'Limite de requisições excedido. Tente novamente mais tarde';
     } else if (error.message.includes('private video')) {
       errorMessage = 'Este vídeo é privado e não pode ser processado';
+    } else if (error.message.includes('WAV não foi criado')) {
+      errorMessage = 'Erro na conversão do áudio. Tente novamente';
+    } else if (error.message.includes('ffmpeg')) {
+      errorMessage = 'Erro no processamento do áudio. Verifique se o FFmpeg está instalado corretamente';
+    } else if (error.message.includes('network')) {
+      errorMessage = 'Erro de conexão. Verifique sua internet e tente novamente';
     }
     
     res.status(500).json({ 
