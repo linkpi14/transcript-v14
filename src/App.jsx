@@ -128,13 +128,16 @@ const VideoTranscriptionApp = () => {
       setIsTranslating(shouldTranslate);
       setIsFormatting(shouldFormat);
 
+      // Usar o texto processado se disponível, caso contrário usar a transcrição original
+      const textToProcess = processedTranscription || text;
+
       const response = await fetch('/api/process-text', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ 
-          text,
+          text: textToProcess,
           shouldTranslate,
           shouldFormat
         }),
