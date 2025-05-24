@@ -1,517 +1,533 @@
-import React, { useState } from 'react';
-import { Upload, Link, Play, FileText, Copy, Loader2, CheckCircle, AlertCircle, Languages, Type } from 'lucide-react';
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import { OpenAI } from 'openai';
+import ytdl from 'ytdl-core';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegStatic from 'ffmpeg-static';
 
-const VideoTranscriptionApp = () => {
-  const [activeTab, setActiveTab] = useState('upload');
-  const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [instagramUrl, setInstagramUrl] = useState('');
-  const [uploadedFile, setUploadedFile] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [transcription, setTranscription] = useState('');
-  const [processedTranscription, setProcessedTranscription] = useState('');
-  const [status, setStatus] = useState('idle');
-  const [isCopied, setIsCopied] = useState(false);
-  const [error, setError] = useState('');
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [isFormatting, setIsFormatting] = useState(false);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  // Função para chamar API do YouTube
-  const handleYouTubeSubmit = async () => {
-    if (!youtubeUrl.trim()) return;
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Configurar FFmpeg
+ffmpeg.setFfmpegPath(ffmpegStatic);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('dist'));
+
+// Configurar OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || 'sua-chave-aqui'
+});
+
+// Configurar Multer para upload
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = 'uploads';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir);
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
+});
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+});
+
+// =============================================
+// FUNÇÕES AUXILIARES
+// =============================================
+
+// Função para converter vídeo para áudio (WAV ou MP3)
+const convertVideoToAudio = (inputPath, outputPath) => {
+  return new Promise((resolve, reject) => {
+    const isWav = outputPath.endsWith('.wav');
     
-    setIsProcessing(true);
-    setStatus('processing');
-    setTranscription('');
-    setError('');
-    
-    try {
-      const response = await fetch('/api/transcribe-youtube', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: youtubeUrl }),
+    let command = ffmpeg(inputPath)
+      .audioFrequency(16000) // Whisper funciona melhor com 16kHz
+      .audioChannels(1) // Mono para reduzir tamanho
+      .on('start', (commandLine) => {
+        console.log('FFmpeg iniciado:', commandLine);
+      })
+      .on('progress', (progress) => {
+        console.log(`Progresso: ${Math.round(progress.percent || 0)}%`);
+      })
+      .on('end', () => {
+        console.log('Conversão concluída:', outputPath);
+        resolve(outputPath);
+      })
+      .on('error', (err) => {
+        console.error('Erro na conversão:', err);
+        
+        // Se falhar, tentar com WAV como fallback
+        if (!isWav && outputPath.endsWith('.mp3')) {
+          console.log('Tentando conversão para WAV...');
+          const wavPath = outputPath.replace('.mp3', '.wav');
+          convertVideoToAudio(inputPath, wavPath)
+            .then(resolve)
+            .catch(reject);
+        } else {
+          reject(err);
+        }
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Erro ao processar vídeo');
+    if (isWav) {
+      // WAV é mais universal e sempre funciona
+      command
+        .audioCodec('pcm_s16le')
+        .format('wav');
+    } else {
+      // Tentar MP3 primeiro, com fallback para WAV
+      try {
+        command
+          .audioCodec('libmp3lame') // Codec MP3 mais comum
+          .audioBitrate('64k')
+          .format('mp3');
+      } catch (error) {
+        console.log('MP3 não disponível, usando WAV');
+        command
+          .audioCodec('pcm_s16le')
+          .format('wav');
       }
-
-      setTranscription(data.transcription);
-      setStatus('completed');
-    } catch (error) {
-      console.error('Erro:', error);
-      setError(error.message);
-      setStatus('error');
-    } finally {
-      setIsProcessing(false);
     }
-  };
 
-  // Função para chamar API do Instagram
-  const handleInstagramSubmit = async () => {
-    if (!instagramUrl.trim()) return;
-    
-    setIsProcessing(true);
-    setStatus('processing');
-    setTranscription('');
-    setError('');
-    
-    try {
-      const response = await fetch('/api/transcribe-instagram', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: instagramUrl }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Erro ao processar vídeo');
-      }
-
-      setTranscription(data.transcription);
-      setStatus('completed');
-    } catch (error) {
-      console.error('Erro:', error);
-      setError(error.message);
-      setStatus('error');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  // Função para upload de arquivo
-  const handleFileUpload = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-    
-    setUploadedFile(file);
-    setIsProcessing(true);
-    setStatus('processing');
-    setTranscription('');
-    setError('');
-    
-    try {
-      const formData = new FormData();
-      formData.append('video', file);
-
-      const response = await fetch('/api/transcribe-file', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Erro ao processar arquivo');
-      }
-
-      setTranscription(data.transcription);
-      setStatus('completed');
-    } catch (error) {
-      console.error('Erro:', error);
-      setError(error.message);
-      setStatus('error');
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  // Função para processar o texto (traduzir/formatar)
-  const processText = async (text, shouldTranslate, shouldFormat) => {
-    try {
-      setIsTranslating(shouldTranslate);
-      setIsFormatting(shouldFormat);
-
-      const response = await fetch('/api/process-text', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          text,
-          shouldTranslate,
-          shouldFormat
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Erro ao processar texto');
-      }
-
-      setProcessedTranscription(data.processedText);
-      setStatus('completed');
-    } catch (error) {
-      console.error('Erro:', error);
-      setError(error.message);
-      setStatus('error');
-    } finally {
-      setIsTranslating(false);
-      setIsFormatting(false);
-    }
-  };
-
-  // Função para copiar transcrição
-  const copyTranscription = async () => {
-    const textToCopy = processedTranscription || transcription;
-    try {
-      await navigator.clipboard.writeText(textToCopy);
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 2000);
-    } catch (error) {
-      const textArea = document.createElement('textarea');
-      textArea.value = textToCopy;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textArea);
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 2000);
-    }
-  };
-
-  // Função para resetar app
-  const resetApp = () => {
-    setYoutubeUrl('');
-    setInstagramUrl('');
-    setUploadedFile(null);
-    setTranscription('');
-    setProcessedTranscription('');
-    setStatus('idle');
-    setIsProcessing(false);
-    setIsCopied(false);
-    setError('');
-    setIsTranslating(false);
-    setIsFormatting(false);
-  };
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      <div className="container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">
-            Transcritor de Vídeos
-          </h1>
-          <p className="text-gray-600 text-lg">
-            Converta áudio de vídeos em texto automaticamente
-          </p>
-        </div>
-
-        {/* Main Content */}
-        <div className="max-w-4xl mx-auto">
-          <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
-            {/* Tabs */}
-            <div className="flex border-b border-gray-200">
-              <button
-                onClick={() => setActiveTab('upload')}
-                className={`flex-1 py-4 px-6 text-center font-medium transition-colors ${
-                  activeTab === 'upload'
-                    ? 'bg-blue-500 text-white'
-                    : 'text-gray-600 hover:text-blue-500'
-                }`}
-              >
-                <Upload className="w-5 h-5 inline-block mr-2" />
-                Upload
-              </button>
-              <button
-                onClick={() => setActiveTab('youtube')}
-                className={`flex-1 py-4 px-6 text-center font-medium transition-colors ${
-                  activeTab === 'youtube'
-                    ? 'bg-red-500 text-white'
-                    : 'text-gray-600 hover:text-red-500'
-                }`}
-              >
-                <Play className="w-5 h-5 inline-block mr-2" />
-                YouTube
-              </button>
-              <button
-                onClick={() => setActiveTab('instagram')}
-                className={`flex-1 py-4 px-6 text-center font-medium transition-colors ${
-                  activeTab === 'instagram'
-                    ? 'bg-pink-500 text-white'
-                    : 'text-gray-600 hover:text-pink-500'
-                }`}
-              >
-                <Link className="w-5 h-5 inline-block mr-2" />
-                Instagram
-              </button>
-            </div>
-
-            <div className="p-8">
-              {/* Upload Tab */}
-              {activeTab === 'upload' && (
-                <div>
-                  <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors">
-                    <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                    <h3 className="text-lg font-medium text-gray-700 mb-2">
-                      Envie seu vídeo
-                    </h3>
-                    <p className="text-gray-500 mb-4">
-                      Suporta MP4, AVI, MOV, MKV (até 100MB)
-                    </p>
-                    <input
-                      type="file"
-                      accept="video/*,audio/*"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                      id="file-upload"
-                      disabled={isProcessing}
-                    />
-                    <label
-                      htmlFor="file-upload"
-                      className={`inline-block px-6 py-3 rounded-lg cursor-pointer transition-colors ${
-                        isProcessing 
-                          ? 'bg-gray-400 text-gray-200 cursor-not-allowed' 
-                          : 'bg-blue-500 text-white hover:bg-blue-600'
-                      }`}
-                    >
-                      {isProcessing ? 'Processando...' : 'Escolher Arquivo'}
-                    </label>
-                    {uploadedFile && (
-                      <p className="mt-4 text-sm text-gray-600">
-                        Arquivo selecionado: {uploadedFile.name}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* YouTube Tab */}
-              {activeTab === 'youtube' && (
-                <div>
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
-                        <Play className="w-6 h-6 text-red-600" />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-medium text-gray-700">
-                          YouTube
-                        </h3>
-                        <p className="text-gray-500 text-sm">
-                          Cole o link do vídeo do YouTube
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex gap-3">
-                      <input
-                        type="url"
-                        value={youtubeUrl}
-                        onChange={(e) => setYoutubeUrl(e.target.value)}
-                        placeholder="https://www.youtube.com/watch?v=..."
-                        className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                        disabled={isProcessing}
-                      />
-                      <button
-                        onClick={handleYouTubeSubmit}
-                        disabled={!youtubeUrl.trim() || isProcessing}
-                        className="bg-red-500 text-white px-6 py-3 rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                      >
-                        {isProcessing ? (
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                        ) : (
-                          <Play className="w-5 h-5" />
-                        )}
-                        Transcrever
-                      </button>
-                    </div>
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                      <h4 className="font-medium text-red-800 mb-2">Formatos suportados:</h4>
-                      <ul className="text-red-700 text-sm space-y-1">
-                        <li>• Vídeos públicos do YouTube</li>
-                        <li>• YouTube Shorts</li>
-                        <li>• Listas de reprodução (vídeo individual)</li>
-                        <li>• Máximo 2 horas de duração</li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Instagram Tab */}
-              {activeTab === 'instagram' && (
-                <div>
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-10 h-10 bg-pink-100 rounded-lg flex items-center justify-center">
-                        <Link className="w-6 h-6 text-pink-600" />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-medium text-gray-700">
-                          Instagram
-                        </h3>
-                        <p className="text-gray-500 text-sm">
-                          Cole o link do post, Reels ou IGTV
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex gap-3">
-                      <input
-                        type="url"
-                        value={instagramUrl}
-                        onChange={(e) => setInstagramUrl(e.target.value)}
-                        placeholder="https://www.instagram.com/p/..."
-                        className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent"
-                        disabled={isProcessing}
-                      />
-                      <button
-                        onClick={handleInstagramSubmit}
-                        disabled={!instagramUrl.trim() || isProcessing}
-                        className="bg-pink-500 text-white px-6 py-3 rounded-lg hover:bg-pink-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                      >
-                        {isProcessing ? (
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                        ) : (
-                          <Link className="w-5 h-5" />
-                        )}
-                        Transcrever
-                      </button>
-                    </div>
-                    <div className="bg-pink-50 border border-pink-200 rounded-lg p-4">
-                      <h4 className="font-medium text-pink-800 mb-2">Formatos suportados:</h4>
-                      <ul className="text-pink-700 text-sm space-y-1">
-                        <li>• Posts com vídeo</li>
-                        <li>• Instagram Reels</li>
-                        <li>• IGTV</li>
-                        <li>• Stories (se públicos)</li>
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Status */}
-              {status === 'processing' && (
-                <div className="mt-8 p-4 rounded-lg bg-blue-50 border border-blue-200">
-                  <div className="flex items-center justify-center text-blue-600">
-                    <Loader2 className="w-6 h-6 animate-spin mr-3" />
-                    <span className="font-medium">Processando vídeo... Isso pode levar alguns minutos.</span>
-                  </div>
-                </div>
-              )}
-              
-              {status === 'completed' && (
-                <div className="mt-8 p-4 rounded-lg bg-green-50 border border-green-200">
-                  <div className="flex items-center text-green-600">
-                    <CheckCircle className="w-6 h-6 mr-3" />
-                    <span className="font-medium">Transcrição concluída com sucesso!</span>
-                  </div>
-                </div>
-              )}
-              
-              {status === 'error' && (
-                <div className="mt-8 p-4 rounded-lg bg-red-50 border border-red-200">
-                  <div className="flex items-center text-red-600">
-                    <AlertCircle className="w-6 h-6 mr-3" />
-                    <div>
-                      <span className="font-medium">Erro ao processar:</span>
-                      <p className="text-sm mt-1">{error}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Transcription Result */}
-              {transcription && (
-                <div className="mt-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-medium text-gray-700 flex items-center">
-                      <FileText className="w-5 h-5 mr-2" />
-                      Transcrição
-                    </h3>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => processText(transcription, true, false)}
-                        disabled={isTranslating || isFormatting}
-                        className={`px-4 py-2 rounded-lg transition-colors flex items-center ${
-                          isTranslating 
-                            ? 'bg-gray-400 cursor-not-allowed'
-                            : 'bg-blue-500 text-white hover:bg-blue-600'
-                        }`}
-                      >
-                        {isTranslating ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            Traduzindo...
-                          </>
-                        ) : (
-                          <>
-                            <Languages className="w-4 h-4 mr-2" />
-                            Traduzir
-                          </>
-                        )}
-                      </button>
-                      <button
-                        onClick={() => processText(transcription, false, true)}
-                        disabled={isTranslating || isFormatting}
-                        className={`px-4 py-2 rounded-lg transition-colors flex items-center ${
-                          isFormatting 
-                            ? 'bg-gray-400 cursor-not-allowed'
-                            : 'bg-purple-500 text-white hover:bg-purple-600'
-                        }`}
-                      >
-                        {isFormatting ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            Formatando...
-                          </>
-                        ) : (
-                          <>
-                            <Type className="w-4 h-4 mr-2" />
-                            Formatar
-                          </>
-                        )}
-                      </button>
-                      <button
-                        onClick={copyTranscription}
-                        className={`px-4 py-2 rounded-lg transition-colors flex items-center ${
-                          isCopied 
-                            ? 'bg-green-500 text-white' 
-                            : 'bg-gray-500 text-white hover:bg-gray-600'
-                        }`}
-                      >
-                        {isCopied ? (
-                          <>
-                            <CheckCircle className="w-4 h-4 mr-2" />
-                            Copiado!
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-4 h-4 mr-2" />
-                            Copiar
-                          </>
-                        )}
-                      </button>
-                      <button
-                        onClick={resetApp}
-                        className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors"
-                      >
-                        Novo Vídeo
-                      </button>
-                    </div>
-                  </div>
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-6">
-                    <pre className="whitespace-pre-wrap text-gray-700 text-sm font-sans">
-                      {processedTranscription || transcription}
-                    </pre>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+    command.save(outputPath);
+  });
 };
 
-export default VideoTranscriptionApp;
+// Função para limpar arquivos temporários
+const cleanupFile = (filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      console.log('Arquivo removido:', filePath);
+    }
+  } catch (error) {
+    console.error('Erro ao remover arquivo:', filePath, error);
+  }
+};
 
+// Função simplificada para validar arquivo (sem ffprobe)
+const validateMediaFile = (filePath, originalName) => {
+  return new Promise((resolve, reject) => {
+    // Verificar se o arquivo existe
+    if (!fs.existsSync(filePath)) {
+      return reject(new Error('Arquivo não encontrado'));
+    }
+
+    // Verificar tamanho do arquivo
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      return reject(new Error('Arquivo está vazio'));
+    }
+
+    // Verificar extensão do arquivo
+    const allowedExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.mp3', '.wav', '.m4a', '.aac', '.flac'];
+    const extension = path.extname(originalName).toLowerCase();
+    
+    if (!allowedExtensions.includes(extension)) {
+      return reject(new Error(`Formato não suportado: ${extension}. Formatos aceitos: ${allowedExtensions.join(', ')}`));
+    }
+
+    console.log(`Arquivo validado: ${originalName} (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
+    resolve({
+      size: stats.size,
+      extension: extension,
+      name: originalName
+    });
+  });
+};
+
+// Função para traduzir texto usando ChatGPT
+const translateText = async (text) => {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "Você é um tradutor profissional. Traduza o texto para português do Brasil mantendo o significado e o tom original."
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ],
+      temperature: 0.3
+    });
+
+    return completion.choices[0].message.content;
+  } catch (error) {
+    console.error('Erro na tradução:', error);
+    throw new Error('Falha ao traduzir o texto: ' + error.message);
+  }
+};
+
+// Função para organizar e formatar o texto
+const formatText = async (text) => {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: "Você é um editor profissional. Organize o texto em parágrafos lógicos, corrija erros de pontuação e formatação, e melhore a legibilidade mantendo o conteúdo original."
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ],
+      temperature: 0.3
+    });
+
+    return completion.choices[0].message.content;
+  } catch (error) {
+    console.error('Erro na formatação:', error);
+    throw new Error('Falha ao formatar o texto: ' + error.message);
+  }
+};
+
+// =============================================
+// ROTAS DA API
+// =============================================
+
+// Rota para transcrever YouTube
+app.post('/api/transcribe-youtube', async (req, res) => {
+  let audioPath = null;
+  let mp3Path = null;
+
+  try {
+    const { url, language, shouldTranslate = false, shouldFormat = false } = req.body;
+    
+    if (!ytdl.validateURL(url)) {
+      return res.status(400).json({ 
+        error: 'URL do YouTube inválida' 
+      });
+    }
+
+    console.log('Processando YouTube:', url);
+    
+    // Baixar áudio do YouTube
+    audioPath = `temp_youtube_${Date.now()}.webm`;
+    mp3Path = `temp_youtube_${Date.now()}.wav`; // Usar WAV como padrão mais compatível
+
+    const audioStream = ytdl(url, {
+      filter: 'audioonly',
+      quality: 'highestaudio'
+    });
+
+    const writeStream = fs.createWriteStream(audioPath);
+    audioStream.pipe(writeStream);
+
+    await new Promise((resolve, reject) => {
+      writeStream.on('finish', resolve);
+      writeStream.on('error', reject);
+      audioStream.on('error', reject);
+    });
+
+    console.log('Áudio baixado, convertendo...');
+
+    // Converter para áudio compatível
+    await convertVideoToAudio(audioPath, mp3Path);
+
+    // Transcrever com OpenAI (ou simulação)
+    let transcription;
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
+      console.log('Enviando para Whisper...');
+      
+      const transcriptionParams = {
+        file: fs.createReadStream(mp3Path),
+        model: "whisper-1"
+      };
+      
+      if (language && language !== 'auto') {
+        transcriptionParams.language = language;
+        console.log(`Idioma forçado: ${language}`);
+      } else {
+        console.log('Detecção automática de idioma');
+      }
+      
+      const response = await openai.audio.transcriptions.create(transcriptionParams);
+      transcription = response.text;
+
+      // Processar o texto se solicitado
+      if (shouldTranslate || shouldFormat) {
+        console.log('Processando texto transcrito...');
+        let processedText = transcription;
+
+        if (shouldTranslate) {
+          console.log('Traduzindo...');
+          processedText = await translateText(processedText);
+        }
+
+        if (shouldFormat) {
+          console.log('Formatando...');
+          processedText = await formatText(processedText);
+        }
+
+        return res.json({ 
+          originalTranscription: transcription,
+          processedTranscription: processedText,
+          operations: {
+            translated: shouldTranslate,
+            formatted: shouldFormat
+          }
+        });
+      }
+    } else {
+      // Simulação para demonstração
+      transcription = `Transcrição simulada do vídeo YouTube: ${url}\n\nEsta é uma demonstração. Para funcionar de verdade, você precisa:\n1. Configurar sua chave da OpenAI\n2. Adicionar OPENAI_API_KEY nas variáveis de ambiente\n\nO vídeo foi baixado e convertido para MP3 com sucesso. Esta seria a transcrição real do áudio.`;
+    }
+
+    res.json({ transcription });
+
+  } catch (error) {
+    console.error('Erro YouTube:', error);
+    res.status(500).json({ 
+      error: 'Erro ao processar vídeo do YouTube: ' + error.message 
+    });
+  } finally {
+    // Limpar arquivos temporários
+    cleanupFile(audioPath);
+    cleanupFile(mp3Path);
+  }
+});
+
+// Rota para transcrever Instagram
+app.post('/api/transcribe-instagram', async (req, res) => {
+  try {
+    const { url, language } = req.body; // Adicionar parâmetro de idioma
+    
+    console.log('Processando Instagram:', url);
+    
+    // Para Instagram, você precisaria usar bibliotecas específicas
+    // Por enquanto, simulação
+    const transcription = `Transcrição simulada do Instagram: ${url}\n\nEsta é uma demonstração. Para Instagram funcionar de verdade, você precisa:\n1. Implementar downloader do Instagram (instaloader, etc.)\n2. Configurar autenticação se necessário\n3. Processar diferentes tipos de mídia (Reels, IGTV, Posts)\n\nO conteúdo seria baixado, convertido para MP3 e transcrito automaticamente.`;
+
+    res.json({ transcription });
+
+  } catch (error) {
+    console.error('Erro Instagram:', error);
+    res.status(500).json({ 
+      error: 'Erro ao processar vídeo do Instagram: ' + error.message 
+    });
+  }
+});
+
+// Rota para upload de arquivo
+app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
+  let mp3Path = null;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+    }
+
+    const language = req.body.language;
+    const shouldTranslate = req.body.shouldTranslate === 'true';
+    const shouldFormat = req.body.shouldFormat === 'true';
+
+    console.log('Processando arquivo:', req.file.filename);
+
+    // Validar arquivo sem usar ffprobe
+    try {
+      const fileInfo = await validateMediaFile(req.file.path, req.file.originalname);
+      console.log('Arquivo validado:', fileInfo);
+    } catch (error) {
+      console.error('Erro ao validar arquivo:', error);
+      return res.status(400).json({ 
+        error: 'Arquivo inválido: ' + error.message 
+      });
+    }
+
+    // Definir caminho do arquivo de áudio
+    const fileExtension = path.extname(req.file.filename);
+    const baseName = path.basename(req.file.filename, fileExtension);
+    mp3Path = path.join('uploads', `${baseName}_converted.wav`); // Usar WAV como padrão
+
+    console.log('Convertendo para áudio...');
+
+    // Converter para áudio compatível
+    await convertVideoToAudio(req.file.path, mp3Path);
+
+    let transcription;
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
+      console.log('Enviando para Whisper...');
+      
+      const transcriptionParams = {
+        file: fs.createReadStream(mp3Path),
+        model: "whisper-1"
+      };
+      
+      if (language && language !== 'auto') {
+        transcriptionParams.language = language;
+        console.log(`Idioma forçado: ${language}`);
+      } else {
+        console.log('Detecção automática de idioma');
+      }
+      
+      const response = await openai.audio.transcriptions.create(transcriptionParams);
+      transcription = response.text;
+
+      // Processar o texto se solicitado
+      if (shouldTranslate || shouldFormat) {
+        console.log('Processando texto transcrito...');
+        let processedText = transcription;
+
+        if (shouldTranslate) {
+          console.log('Traduzindo...');
+          processedText = await translateText(processedText);
+        }
+
+        if (shouldFormat) {
+          console.log('Formatando...');
+          processedText = await formatText(processedText);
+        }
+
+        return res.json({ 
+          originalTranscription: transcription,
+          processedTranscription: processedText,
+          operations: {
+            translated: shouldTranslate,
+            formatted: shouldFormat
+          }
+        });
+      }
+    } else {
+      transcription = `Transcrição simulada do arquivo: ${req.file.originalname}\n\nEsta é uma demonstração. O arquivo foi recebido e processado com sucesso:\n- Nome: ${req.file.originalname}\n- Tamanho: ${(req.file.size / 1024 / 1024).toFixed(2)}MB\n- Tipo: ${req.file.mimetype}\n\nO arquivo foi convertido para MP3 e estaria pronto para transcrição.\nPara funcionar de verdade, configure sua chave da OpenAI.`;
+    }
+
+    res.json({ transcription });
+
+  } catch (error) {
+    console.error('Erro arquivo:', error);
+    res.status(500).json({ 
+      error: 'Erro ao processar arquivo: ' + error.message 
+    });
+  } finally {
+    // Limpar arquivos
+    cleanupFile(req.file?.path);
+    cleanupFile(mp3Path);
+  }
+});
+
+// Rota para obter idiomas suportados
+app.get('/api/languages', (req, res) => {
+  const languages = [
+    { code: 'auto', name: 'Detectar Automaticamente' },
+    { code: 'en', name: 'English' },
+    { code: 'pt', name: 'Português' },
+    { code: 'es', name: 'Español' },
+    { code: 'fr', name: 'Français' },
+    { code: 'de', name: 'Deutsch' },
+    { code: 'it', name: 'Italiano' },
+    { code: 'ja', name: '日本語' },
+    { code: 'ko', name: '한국어' },
+    { code: 'zh', name: '中文' },
+    { code: 'ru', name: 'Русский' },
+    { code: 'ar', name: 'العربية' },
+    { code: 'hi', name: 'हिन्दी' },
+    { code: 'nl', name: 'Nederlands' },
+    { code: 'sv', name: 'Svenska' },
+    { code: 'da', name: 'Dansk' },
+    { code: 'no', name: 'Norsk' },
+    { code: 'fi', name: 'Suomi' },
+    { code: 'pl', name: 'Polski' },
+    { code: 'tr', name: 'Türkçe' },
+    { code: 'uk', name: 'Українська' },
+    { code: 'cs', name: 'Čeština' },
+    { code: 'hu', name: 'Magyar' },
+    { code: 'ro', name: 'Română' },
+    { code: 'bg', name: 'Български' },
+    { code: 'hr', name: 'Hrvatski' },
+    { code: 'sk', name: 'Slovenčina' },
+    { code: 'sl', name: 'Slovenščina' },
+    { code: 'et', name: 'Eesti' },
+    { code: 'lv', name: 'Latviešu' },
+    { code: 'lt', name: 'Lietuvių' }
+  ];
+  
+  res.json({ languages });
+});
+
+// Rota de health check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    hasOpenAI: !!(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui'),
+    ffmpegPath: ffmpegStatic
+  });
+});
+
+// Rota para processar o texto (traduzir e formatar)
+app.post('/api/process-text', async (req, res) => {
+  try {
+    const { text, shouldTranslate = true, shouldFormat = true } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ error: 'Texto não fornecido' });
+    }
+
+    let processedText = text;
+
+    // Traduzir se necessário
+    if (shouldTranslate) {
+      console.log('Traduzindo texto...');
+      processedText = await translateText(processedText);
+    }
+
+    // Formatar se necessário
+    if (shouldFormat) {
+      console.log('Formatando texto...');
+      processedText = await formatText(processedText);
+    }
+
+    res.json({ 
+      processedText,
+      operations: {
+        translated: shouldTranslate,
+        formatted: shouldFormat
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao processar texto:', error);
+    res.status(500).json({ 
+      error: 'Erro ao processar texto: ' + error.message 
+    });
+  }
+});
+
+// Servir frontend em produção
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`📱 Acesse: http://localhost:${PORT}`);
+  console.log(`🔧 FFmpeg configurado: ${ffmpegStatic}`);
+  console.log(`🤖 OpenAI configurado: ${!!(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui')}`);
+  
+  // Testar FFmpeg
+  if (ffmpegStatic) {
+    console.log('✅ FFmpeg encontrado e configurado');
+  } else {
+    console.log('❌ FFmpeg não encontrado - instale manualmente se necessário');
+  }
+});
