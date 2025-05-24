@@ -161,7 +161,7 @@ app.post('/api/transcribe-youtube', async (req, res) => {
   let mp3Path = null;
 
   try {
-    const { url } = req.body;
+    const { url, language } = req.body; // Adicionar parâmetro de idioma
     
     if (!ytdl.validateURL(url)) {
       return res.status(400).json({ 
@@ -198,11 +198,22 @@ app.post('/api/transcribe-youtube', async (req, res) => {
     let transcription;
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
       console.log('Enviando para Whisper...');
-      const response = await openai.audio.transcriptions.create({
+      
+      // Configurar parâmetros da transcrição
+      const transcriptionParams = {
         file: fs.createReadStream(mp3Path),
-        model: "whisper-1",
-        language: "pt", // Especificar português para melhor precisão
-      });
+        model: "whisper-1"
+      };
+      
+      // Adicionar idioma apenas se especificado
+      if (language && language !== 'auto') {
+        transcriptionParams.language = language;
+        console.log(`Idioma forçado: ${language}`);
+      } else {
+        console.log('Detecção automática de idioma');
+      }
+      
+      const response = await openai.audio.transcriptions.create(transcriptionParams);
       transcription = response.text;
     } else {
       // Simulação para demonstração
@@ -226,7 +237,7 @@ app.post('/api/transcribe-youtube', async (req, res) => {
 // Rota para transcrever Instagram
 app.post('/api/transcribe-instagram', async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, language } = req.body; // Adicionar parâmetro de idioma
     
     console.log('Processando Instagram:', url);
     
@@ -252,6 +263,9 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
     }
+
+    // Obter idioma do body da requisição
+    const language = req.body.language;
 
     console.log('Processando arquivo:', req.file.filename);
 
@@ -279,11 +293,22 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
     let transcription;
     if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
       console.log('Enviando para Whisper...');
-      const response = await openai.audio.transcriptions.create({
+      
+      // Configurar parâmetros da transcrição
+      const transcriptionParams = {
         file: fs.createReadStream(mp3Path),
-        model: "whisper-1",
-        language: "pt", // Especificar português para melhor precisão
-      });
+        model: "whisper-1"
+      };
+      
+      // Adicionar idioma apenas se especificado
+      if (language && language !== 'auto') {
+        transcriptionParams.language = language;
+        console.log(`Idioma forçado: ${language}`);
+      } else {
+        console.log('Detecção automática de idioma');
+      }
+      
+      const response = await openai.audio.transcriptions.create(transcriptionParams);
       transcription = response.text;
     } else {
       transcription = `Transcrição simulada do arquivo: ${req.file.originalname}\n\nEsta é uma demonstração. O arquivo foi recebido e processado com sucesso:\n- Nome: ${req.file.originalname}\n- Tamanho: ${(req.file.size / 1024 / 1024).toFixed(2)}MB\n- Tipo: ${req.file.mimetype}\n\nO arquivo foi convertido para MP3 e estaria pronto para transcrição.\nPara funcionar de verdade, configure sua chave da OpenAI.`;
@@ -301,6 +326,45 @@ app.post('/api/transcribe-file', upload.single('video'), async (req, res) => {
     cleanupFile(req.file?.path);
     cleanupFile(mp3Path);
   }
+});
+
+// Rota para obter idiomas suportados
+app.get('/api/languages', (req, res) => {
+  const languages = [
+    { code: 'auto', name: 'Detectar Automaticamente' },
+    { code: 'en', name: 'English' },
+    { code: 'pt', name: 'Português' },
+    { code: 'es', name: 'Español' },
+    { code: 'fr', name: 'Français' },
+    { code: 'de', name: 'Deutsch' },
+    { code: 'it', name: 'Italiano' },
+    { code: 'ja', name: '日本語' },
+    { code: 'ko', name: '한국어' },
+    { code: 'zh', name: '中文' },
+    { code: 'ru', name: 'Русский' },
+    { code: 'ar', name: 'العربية' },
+    { code: 'hi', name: 'हिन्दी' },
+    { code: 'nl', name: 'Nederlands' },
+    { code: 'sv', name: 'Svenska' },
+    { code: 'da', name: 'Dansk' },
+    { code: 'no', name: 'Norsk' },
+    { code: 'fi', name: 'Suomi' },
+    { code: 'pl', name: 'Polski' },
+    { code: 'tr', name: 'Türkçe' },
+    { code: 'uk', name: 'Українська' },
+    { code: 'cs', name: 'Čeština' },
+    { code: 'hu', name: 'Magyar' },
+    { code: 'ro', name: 'Română' },
+    { code: 'bg', name: 'Български' },
+    { code: 'hr', name: 'Hrvatski' },
+    { code: 'sk', name: 'Slovenčina' },
+    { code: 'sl', name: 'Slovenščina' },
+    { code: 'et', name: 'Eesti' },
+    { code: 'lv', name: 'Latviešu' },
+    { code: 'lt', name: 'Lietuvių' }
+  ];
+  
+  res.json({ languages });
 });
 
 // Rota de health check
