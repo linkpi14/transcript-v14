@@ -213,25 +213,36 @@ async function downloadInstagramVideo(url) {
       throw new Error('URL do Instagram inválida');
     }
 
-    // Usar a API pública do Instagram para obter os metadados do post
-    const response = await fetch(`https://www.instagram.com/p/${shortcode}/?__a=1`);
-    const data = await response.json();
+    // Primeiro, obter o HTML da página do Instagram
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
 
-    // Tentar diferentes caminhos para encontrar a URL do vídeo
-    let videoUrl;
-    try {
-      videoUrl = data.graphql?.shortcode_media?.video_url ||
-                data.items?.[0]?.video_versions?.[0]?.url;
-    } catch (error) {
+    const html = await response.text();
+
+    // Procurar pela URL do vídeo no HTML
+    const videoUrlMatch = html.match(/"video_url":"([^"]+)"/);
+    if (!videoUrlMatch) {
       throw new Error('Não foi possível encontrar o vídeo neste post');
     }
 
-    if (!videoUrl) {
-      throw new Error('Nenhum vídeo encontrado neste post');
-    }
+    // Decodificar a URL do vídeo (remover escapes)
+    const videoUrl = videoUrlMatch[1].replace(/\\u0026/g, '&');
 
     // Baixar o vídeo
-    const videoResponse = await fetch(videoUrl);
+    const videoResponse = await fetch(videoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': 'https://www.instagram.com/'
+      }
+    });
+
+    if (!videoResponse.ok) {
+      throw new Error(`Falha ao baixar vídeo: ${videoResponse.status} ${videoResponse.statusText}`);
+    }
+
     const arrayBuffer = await videoResponse.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
