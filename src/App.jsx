@@ -15,13 +15,31 @@ const VideoTranscriptionApp = () => {
   const [isTranslating, setIsTranslating] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
 
+  // Validar URL do YouTube
+  const isValidYouTubeUrl = (url) => {
+    if (!url) return false;
+    const pattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
+    return pattern.test(url);
+  };
+
   // Função para chamar API do YouTube
   const handleYouTubeSubmit = async () => {
-    if (!youtubeUrl.trim()) return;
+    if (!youtubeUrl.trim()) {
+      setError('Por favor, insira uma URL do YouTube');
+      setStatus('error');
+      return;
+    }
+
+    if (!isValidYouTubeUrl(youtubeUrl)) {
+      setError('URL do YouTube inválida');
+      setStatus('error');
+      return;
+    }
     
     setIsProcessing(true);
     setStatus('processing');
     setTranscription('');
+    setProcessedTranscription('');
     setError('');
     
     try {
@@ -39,7 +57,13 @@ const VideoTranscriptionApp = () => {
         throw new Error(data.error || 'Erro ao processar vídeo');
       }
 
-      setTranscription(data.transcription);
+      if (data.processedTranscription) {
+        setTranscription(data.originalTranscription);
+        setProcessedTranscription(data.processedTranscription);
+      } else {
+        setTranscription(data.transcription);
+      }
+      
       setStatus('completed');
     } catch (error) {
       console.error('Erro:', error);
@@ -300,7 +324,7 @@ const VideoTranscriptionApp = () => {
                           YouTube
                         </h3>
                         <p className="text-gray-500 text-sm">
-                          Cole o link do vídeo do YouTube
+                          Cole o link do vídeo do YouTube para transcrever
                         </p>
                       </div>
                     </div>
@@ -308,9 +332,17 @@ const VideoTranscriptionApp = () => {
                       <input
                         type="url"
                         value={youtubeUrl}
-                        onChange={(e) => setYoutubeUrl(e.target.value)}
+                        onChange={(e) => {
+                          setYoutubeUrl(e.target.value);
+                          if (error) {
+                            setError('');
+                            setStatus('idle');
+                          }
+                        }}
                         placeholder="https://www.youtube.com/watch?v=..."
-                        className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                        className={`flex-1 px-4 py-3 border rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent ${
+                          error ? 'border-red-500' : 'border-gray-300'
+                        }`}
                         disabled={isProcessing}
                       />
                       <button
@@ -319,13 +351,40 @@ const VideoTranscriptionApp = () => {
                         className="bg-red-500 text-white px-6 py-3 rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                       >
                         {isProcessing ? (
-                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <>
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            Processando...
+                          </>
                         ) : (
-                          <Play className="w-5 h-5" />
+                          <>
+                            <Play className="w-5 h-5" />
+                            Transcrever
+                          </>
                         )}
-                        Transcrever
                       </button>
                     </div>
+
+                    {/* Status Messages */}
+                    {status === 'processing' && (
+                      <div className="mt-4 space-y-2">
+                        <div className="h-1 w-full bg-gray-200 rounded overflow-hidden">
+                          <div className="h-full bg-red-500 w-full animate-pulse"></div>
+                        </div>
+                        <p className="text-sm text-gray-600 text-center">
+                          Processando vídeo... Isso pode levar alguns minutos dependendo do tamanho.
+                        </p>
+                      </div>
+                    )}
+                    
+                    {error && (
+                      <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                        <div className="flex items-center text-red-600">
+                          <AlertCircle className="w-5 h-5 mr-2" />
+                          <span className="font-medium">{error}</span>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="bg-red-50 border border-red-200 rounded-lg p-4">
                       <h4 className="font-medium text-red-800 mb-2">Formatos suportados:</h4>
                       <ul className="text-red-700 text-sm space-y-1">
