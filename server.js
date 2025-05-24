@@ -201,6 +201,51 @@ const formatText = async (text) => {
   }
 };
 
+// Função para baixar vídeo do Instagram
+async function downloadInstagramVideo(url) {
+  try {
+    // Extrair o shortcode da URL do Instagram
+    const shortcode = url.split('/p/')[1]?.split('/')[0] || 
+                     url.split('/reel/')[1]?.split('/')[0] || 
+                     url.split('/tv/')[1]?.split('/')[0];
+    
+    if (!shortcode) {
+      throw new Error('URL do Instagram inválida');
+    }
+
+    // Usar a API pública do Instagram para obter os metadados do post
+    const response = await fetch(`https://www.instagram.com/p/${shortcode}/?__a=1`);
+    const data = await response.json();
+
+    // Tentar diferentes caminhos para encontrar a URL do vídeo
+    let videoUrl;
+    try {
+      videoUrl = data.graphql?.shortcode_media?.video_url ||
+                data.items?.[0]?.video_versions?.[0]?.url;
+    } catch (error) {
+      throw new Error('Não foi possível encontrar o vídeo neste post');
+    }
+
+    if (!videoUrl) {
+      throw new Error('Nenhum vídeo encontrado neste post');
+    }
+
+    // Baixar o vídeo
+    const videoResponse = await fetch(videoUrl);
+    const arrayBuffer = await videoResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Salvar temporariamente
+    const tempPath = `temp_instagram_${Date.now()}.mp4`;
+    fs.writeFileSync(tempPath, buffer);
+
+    return tempPath;
+  } catch (error) {
+    console.error('Erro ao baixar vídeo do Instagram:', error);
+    throw new Error(`Falha ao baixar vídeo do Instagram: ${error.message}`);
+  }
+}
+
 // =============================================
 // ROTAS DA API
 // =============================================
@@ -309,22 +354,61 @@ app.post('/api/transcribe-youtube', async (req, res) => {
 
 // Rota para transcrever Instagram
 app.post('/api/transcribe-instagram', async (req, res) => {
+  let videoPath = null;
+  let audioPath = null;
+
   try {
-    const { url, language } = req.body; // Adicionar parâmetro de idioma
+    const { url, language } = req.body;
     
+    if (!url) {
+      return res.status(400).json({ error: 'URL não fornecida' });
+    }
+
     console.log('Processando Instagram:', url);
     
-    // Para Instagram, você precisaria usar bibliotecas específicas
-    // Por enquanto, simulação
-    const transcription = `Transcrição simulada do Instagram: ${url}\n\nEsta é uma demonstração. Para Instagram funcionar de verdade, você precisa:\n1. Implementar downloader do Instagram (instaloader, etc.)\n2. Configurar autenticação se necessário\n3. Processar diferentes tipos de mídia (Reels, IGTV, Posts)\n\nO conteúdo seria baixado, convertido para MP3 e transcrito automaticamente.`;
+    // Baixar vídeo do Instagram
+    videoPath = await downloadInstagramVideo(url);
+    
+    // Converter para áudio
+    audioPath = `temp_instagram_${Date.now()}.wav`;
+    await convertVideoToAudio(videoPath, audioPath);
 
-    res.json({ transcription });
+    // Transcrever com OpenAI
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'sua-chave-aqui') {
+      console.log('Enviando para Whisper...');
+      
+      const transcriptionParams = {
+        file: fs.createReadStream(audioPath),
+        model: "whisper-1"
+      };
+      
+      if (language && language !== 'auto') {
+        transcriptionParams.language = language;
+      }
+      
+      const response = await openai.audio.transcriptions.create(transcriptionParams);
+      const transcription = response.text;
+
+      res.json({ transcription });
+    } else {
+      res.json({ 
+        transcription: 'Para transcrever vídeos do Instagram, configure sua chave da OpenAI e credenciais do Instagram no arquivo .env' 
+      });
+    }
 
   } catch (error) {
     console.error('Erro Instagram:', error);
     res.status(500).json({ 
       error: 'Erro ao processar vídeo do Instagram: ' + error.message 
     });
+  } finally {
+    // Limpar arquivos temporários
+    try {
+      if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+      if (audioPath && fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
+    } catch (error) {
+      console.error('Erro ao limpar arquivos temporários:', error);
+    }
   }
 });
 
