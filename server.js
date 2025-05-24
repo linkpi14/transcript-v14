@@ -204,33 +204,57 @@ const formatText = async (text) => {
 // Função para baixar áudio do YouTube com retry e fallback
 const downloadYouTubeAudio = async (url, audioPath) => {
   const options = {
-    quality: 'highestaudio',
-    filter: 'audioonly',
     requestOptions: {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Range': 'bytes=0-',
-        'Connection': 'keep-alive'
+        cookie: '',
+        'x-youtube-identity-token': '',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }
     }
   };
 
-  let error;
-  const formats = [
-    { format: 'mp4', quality: '140' },  // M4A audio
-    { format: 'webm', quality: '251' }, // OPUS audio
-    { format: 'webm', quality: '171' }, // VORBIS audio
-    { format: 'mp4', quality: '139' }   // Low quality M4A
-  ];
+  // Tentar obter informações do vídeo com retry
+  let videoInfo;
+  let retryCount = 0;
+  const maxRetries = 3;
 
-  for (const format of formats) {
+  while (retryCount < maxRetries) {
     try {
-      const stream = ytdl(url, {
+      videoInfo = await ytdl.getInfo(url, options);
+      break;
+    } catch (error) {
+      retryCount++;
+      console.log(`Tentativa ${retryCount} de obter informações do vídeo falhou:`, error.message);
+      if (retryCount === maxRetries) throw error;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+
+  // Filtrar e ordenar os formatos de áudio disponíveis
+  const audioFormats = videoInfo.formats
+    .filter(format => format.hasAudio && !format.hasVideo)
+    .sort((a, b) => {
+      // Priorizar formatos de áudio específicos
+      const getFormatPriority = (format) => {
+        if (format.container === 'mp4' && format.audioCodec === 'mp4a.40.2') return 1;
+        if (format.container === 'webm' && format.audioCodec === 'opus') return 2;
+        return 3;
+      };
+      return getFormatPriority(a) - getFormatPriority(b);
+    });
+
+  if (audioFormats.length === 0) {
+    throw new Error('Nenhum formato de áudio disponível');
+  }
+
+  // Tentar cada formato de áudio até um funcionar
+  for (const format of audioFormats) {
+    try {
+      console.log(`Tentando formato: ${format.container} (${format.audioCodec})`);
+      
+      const stream = ytdl.downloadFromInfo(videoInfo, {
         ...options,
-        format: format.format,
-        quality: format.quality
+        format: format
       });
 
       await new Promise((resolve, reject) => {
@@ -246,23 +270,35 @@ const downloadYouTubeAudio = async (url, audioPath) => {
         const writeStream = fs.createWriteStream(audioPath);
         
         writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-        stream.on('error', reject);
+        writeStream.on('error', (err) => {
+          console.error('Erro no writeStream:', err);
+          reject(err);
+        });
         
+        stream.on('error', (err) => {
+          console.error('Erro no stream:', err);
+          reject(err);
+        });
+
         stream.pipe(writeStream);
       });
 
-      // Se chegou aqui, o download foi bem sucedido
-      return;
-    } catch (e) {
-      error = e;
-      console.log(`Tentativa com formato ${format.format} (${format.quality}) falhou:`, e.message);
-      // Continua para o próximo formato
+      // Verificar se o arquivo foi baixado corretamente
+      const stats = fs.statSync(audioPath);
+      if (stats.size > 0) {
+        console.log(`Download concluído: ${(stats.size / 1024 / 1024).toFixed(2)}MB`);
+        return;
+      } else {
+        throw new Error('Arquivo baixado está vazio');
+      }
+    } catch (error) {
+      console.log(`Falha com formato ${format.container}:`, error.message);
+      // Tentar próximo formato
+      continue;
     }
   }
 
-  // Se chegou aqui, todas as tentativas falharam
-  throw error || new Error('Falha ao baixar o áudio do YouTube');
+  throw new Error('Todos os formatos de áudio falharam');
 };
 
 // =============================================
