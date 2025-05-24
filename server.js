@@ -2,12 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { OpenAI } from 'openai';
-import ytdl from 'ytdl-core';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
+import * as play from 'play-dl';
+import youtubeDl from 'youtube-dl-exec';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -201,104 +202,67 @@ const formatText = async (text) => {
   }
 };
 
-// Função para baixar áudio do YouTube com retry e fallback
+// Função para baixar áudio do YouTube usando múltiplas estratégias
 const downloadYouTubeAudio = async (url, audioPath) => {
-  const options = {
-    requestOptions: {
-      headers: {
-        cookie: '',
-        'x-youtube-identity-token': '',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    }
-  };
-
-  // Tentar obter informações do vídeo com retry
-  let videoInfo;
-  let retryCount = 0;
-  const maxRetries = 3;
-
-  while (retryCount < maxRetries) {
-    try {
-      videoInfo = await ytdl.getInfo(url, options);
-      break;
-    } catch (error) {
-      retryCount++;
-      console.log(`Tentativa ${retryCount} de obter informações do vídeo falhou:`, error.message);
-      if (retryCount === maxRetries) throw error;
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    }
-  }
-
-  // Filtrar e ordenar os formatos de áudio disponíveis
-  const audioFormats = videoInfo.formats
-    .filter(format => format.hasAudio && !format.hasVideo)
-    .sort((a, b) => {
-      // Priorizar formatos de áudio específicos
-      const getFormatPriority = (format) => {
-        if (format.container === 'mp4' && format.audioCodec === 'mp4a.40.2') return 1;
-        if (format.container === 'webm' && format.audioCodec === 'opus') return 2;
-        return 3;
-      };
-      return getFormatPriority(a) - getFormatPriority(b);
+  // Primeira tentativa: usar play-dl
+  try {
+    console.log('Tentando download com play-dl...');
+    
+    const yt_info = await play.video_info(url);
+    const stream = await play.stream_from_info(yt_info);
+    
+    await new Promise((resolve, reject) => {
+      const writeStream = fs.createWriteStream(audioPath);
+      stream.stream.pipe(writeStream);
+      
+      writeStream.on('finish', () => {
+        console.log('Download concluído com play-dl');
+        resolve();
+      });
+      
+      writeStream.on('error', (err) => {
+        console.error('Erro no writeStream:', err);
+        reject(err);
+      });
     });
 
-  if (audioFormats.length === 0) {
-    throw new Error('Nenhum formato de áudio disponível');
-  }
-
-  // Tentar cada formato de áudio até um funcionar
-  for (const format of audioFormats) {
-    try {
-      console.log(`Tentando formato: ${format.container} (${format.audioCodec})`);
-      
-      const stream = ytdl.downloadFromInfo(videoInfo, {
-        ...options,
-        format: format
-      });
-
-      await new Promise((resolve, reject) => {
-        let downloadProgress = 0;
-        stream.on('progress', (_, downloaded, total) => {
-          const progress = (downloaded / total) * 100;
-          if (progress - downloadProgress >= 10) {
-            console.log(`Download progresso: ${Math.round(progress)}%`);
-            downloadProgress = progress;
-          }
-        });
-
-        const writeStream = fs.createWriteStream(audioPath);
-        
-        writeStream.on('finish', resolve);
-        writeStream.on('error', (err) => {
-          console.error('Erro no writeStream:', err);
-          reject(err);
-        });
-        
-        stream.on('error', (err) => {
-          console.error('Erro no stream:', err);
-          reject(err);
-        });
-
-        stream.pipe(writeStream);
-      });
-
-      // Verificar se o arquivo foi baixado corretamente
-      const stats = fs.statSync(audioPath);
-      if (stats.size > 0) {
-        console.log(`Download concluído: ${(stats.size / 1024 / 1024).toFixed(2)}MB`);
-        return;
-      } else {
-        throw new Error('Arquivo baixado está vazio');
-      }
-    } catch (error) {
-      console.log(`Falha com formato ${format.container}:`, error.message);
-      // Tentar próximo formato
-      continue;
+    // Verificar se o arquivo foi baixado corretamente
+    const stats = fs.statSync(audioPath);
+    if (stats.size > 0) {
+      console.log(`Download concluído: ${(stats.size / 1024 / 1024).toFixed(2)}MB`);
+      return;
     }
+  } catch (error) {
+    console.log('Falha no download com play-dl:', error.message);
   }
 
-  throw new Error('Todos os formatos de áudio falharam');
+  // Segunda tentativa: usar youtube-dl
+  try {
+    console.log('Tentando download com youtube-dl...');
+    
+    await youtubeDl(url, {
+      extractAudio: true,
+      audioFormat: 'wav',
+      output: audioPath,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      addHeader: [
+        'referer:youtube.com',
+        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      ]
+    });
+
+    // Verificar se o arquivo foi baixado corretamente
+    const stats = fs.statSync(audioPath);
+    if (stats.size > 0) {
+      console.log(`Download concluído com youtube-dl: ${(stats.size / 1024 / 1024).toFixed(2)}MB`);
+      return;
+    }
+  } catch (error) {
+    console.log('Falha no download com youtube-dl:', error.message);
+    throw new Error('Falha ao baixar o áudio do YouTube com todos os métodos disponíveis');
+  }
 };
 
 // =============================================
@@ -321,7 +285,8 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       });
     }
 
-    if (!ytdl.validateURL(url)) {
+    // Validar URL do YouTube
+    if (!url.match(/^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/)) {
       return res.status(400).json({ 
         error: 'URL do YouTube inválida' 
       });
@@ -334,61 +299,17 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       fs.mkdirSync(tempDir);
     }
 
-    // Obter informações do vídeo
-    console.log('Obtendo informações do vídeo...');
-    const videoInfo = await ytdl.getInfo(url, {
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      }
-    });
-
-    const videoLength = parseInt(videoInfo.videoDetails.lengthSeconds);
-    
-    if (videoLength > 7200) {
-      return res.status(400).json({
-        error: 'Vídeo muito longo. O limite é de 2 horas.'
-      });
-    }
-
-    if (videoInfo.videoDetails.isPrivate) {
-      return res.status(400).json({
-        error: 'Não é possível processar vídeos privados'
-      });
-    }
-
     // Definir caminhos dos arquivos
-    audioPath = path.join(tempDir, `temp_youtube_${Date.now()}.webm`);
-    mp3Path = path.join(tempDir, `temp_youtube_${Date.now()}.wav`);
+    audioPath = path.join(tempDir, `temp_youtube_${Date.now()}.wav`);
+    mp3Path = path.join(tempDir, `temp_youtube_${Date.now()}_converted.wav`);
 
-    // Tentar baixar o áudio
-    console.log('Iniciando download do áudio...');
+    // Baixar o áudio
     await downloadYouTubeAudio(url, audioPath);
 
-    // Verificar se o arquivo foi baixado
-    if (!fs.existsSync(audioPath)) {
-      throw new Error('Arquivo de áudio não foi baixado');
-    }
-
-    const audioStats = fs.statSync(audioPath);
-    if (audioStats.size === 0) {
-      throw new Error('Arquivo de áudio está vazio');
-    }
-
-    console.log('Convertendo áudio para WAV...');
+    // Converter para formato adequado para o Whisper
+    console.log('Convertendo áudio para formato adequado...');
     await convertVideoToAudio(audioPath, mp3Path);
-    console.log('Conversão para WAV concluída');
-
-    // Verificar arquivo WAV
-    if (!fs.existsSync(mp3Path)) {
-      throw new Error('Arquivo WAV não foi criado');
-    }
-
-    const wavStats = fs.statSync(mp3Path);
-    if (wavStats.size === 0) {
-      throw new Error('Arquivo WAV está vazio');
-    }
+    console.log('Conversão concluída');
 
     // Verificar a chave da API
     if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'sua-chave-aqui') {
@@ -441,8 +362,8 @@ app.post('/api/transcribe-youtube', async (req, res) => {
       errorMessage = 'Erro na conversão do áudio. Tente novamente';
     } else if (error.message.includes('ffmpeg')) {
       errorMessage = 'Erro no processamento do áudio. Verifique se o FFmpeg está instalado corretamente';
-    } else if (error.message.includes('Status code: 410')) {
-      errorMessage = 'Erro temporário do YouTube. Tente novamente em alguns minutos';
+    } else if (error.message.includes('todos os métodos')) {
+      errorMessage = 'Não foi possível baixar o vídeo. Tente novamente mais tarde ou use outro vídeo.';
     }
     
     res.status(500).json({ 
